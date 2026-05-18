@@ -175,7 +175,7 @@ export class Orchestrator {
     //
     // Composite "register + spawn" workflows live in the agiterra-amat
     // bundle plugin which can legitimately compose wire-tools and
-    // crew-tools as libraries. autosponsor is moving there.
+    // crew-tools as libraries.
 
     const runtime = opts.runtime ?? "claude-code";
     let screenName = `${SCREEN_PREFIX}${id}`;
