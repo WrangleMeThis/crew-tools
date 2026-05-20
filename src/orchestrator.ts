@@ -252,7 +252,7 @@ export class Orchestrator {
             // small delay so the freshly-created surface has time to spawn
             // its shell PTY before we shove a screen -r command at it.
             await new Promise((r) => setTimeout(r, 300));
-            await this.terminal.writeToSession(newSurface, `screen -r ${screenName}\n`);
+            await this.terminal.attachScreen(newSurface, screenName, "r");
           } else {
             console.error(`[crew] split_in_caller_failed: backend returned null for agent '${id}'`);
           }
@@ -594,6 +594,13 @@ export class Orchestrator {
       const pane = this.store.getPane(agent.pane);
       if (pane?.iterm_id) {
         try { await this.terminal.setBadge(pane.iterm_id, ""); } catch {}
+        try {
+          await this.terminal.logWorkspace?.(
+            pane.iterm_id,
+            `${agent.display_name} closed`,
+            { level: "info", source: "crew" },
+          );
+        } catch {}
       }
     }
 
@@ -651,6 +658,13 @@ export class Orchestrator {
       const pane = this.store.getPane(agent.pane);
       if (pane?.iterm_id) {
         try { await this.terminal.setBadge(pane.iterm_id, ""); } catch {}
+        try {
+          await this.terminal.logWorkspace?.(
+            pane.iterm_id,
+            `${agent.display_name} stopped (hard-kill)`,
+            { level: "warning", source: "crew" },
+          );
+        } catch {}
       }
     }
 
@@ -709,8 +723,20 @@ export class Orchestrator {
 
     // Attach screen session to the terminal pane.
     // Use -x (multi-display) to handle edge cases where -r fails.
-    await this.terminal.writeToSession(pane.iterm_id, `screen -x ${agent.screen_name}`);
+    await this.terminal.attachScreen(pane.iterm_id, agent.screen_name, "x");
     this.store.updateAgentPane(agentId, resolvedPane);
+
+    // Surface the attach in the workspace sidebar log. cmux-only — iTerm2
+    // leaves logWorkspace undefined.
+    try {
+      await this.terminal.logWorkspace?.(
+        pane.iterm_id,
+        `${agent.display_name} attached → ${resolvedPane}`,
+        { level: "success", source: "crew" },
+      );
+    } catch {
+      // Non-fatal
+    }
 
     // Flash the tab and notify — agent is now visible.
     // On cmux these are native; on iTerm2 flash is a no-op and notify

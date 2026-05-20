@@ -49,6 +49,24 @@ export interface TerminalBackend {
   /** Write/send text to a specific session/surface. */
   writeToSession(sessionId: string, text: string): Promise<void>;
 
+  /**
+   * Attach a GNU screen session to a terminal pane and commit the command.
+   *
+   * Both backends must commit the attach with a newline/enter. iTerm2's
+   * writeToSession auto-appends a newline via AppleScript's `write text`;
+   * cmux's `send` does not. Without this abstraction, callers had to know
+   * the backend-specific newline convention, which silently broke cmux
+   * (pane sits at unsubmitted `screen -x …` until a human hits enter).
+   *
+   * mode: "r" = reattach (default), "x" = multi-display (use when the
+   *       session may already be attached elsewhere).
+   */
+  attachScreen(
+    sessionId: string,
+    screenName: string,
+    mode?: "r" | "x",
+  ): Promise<void>;
+
   /** Close a session/surface. */
   closeSession(sessionId: string): Promise<void>;
 
@@ -147,6 +165,25 @@ export interface TerminalBackend {
     url: string,
     direction: "horizontal" | "vertical",
   ): Promise<string>;
+
+  // --- Sidebar log (optional, cmux-only today) ---
+
+  /**
+   * Append a workspace-level log entry to the sidebar. Used to surface
+   * agent lifecycle events (attached, closed, error) where the operator
+   * can see them at a glance without opening the pane.
+   *
+   * Optional: iTerm2 has no equivalent and leaves this undefined. The
+   * orchestrator checks for presence before calling. Failures are
+   * non-fatal — logging is decorative.
+   *
+   * level: cmux levels are "info" | "progress" | "success" | "warning" | "error".
+   */
+  logWorkspace?(
+    sessionId: string,
+    message: string,
+    opts?: { level?: "info" | "progress" | "success" | "warning" | "error"; source?: string },
+  ): Promise<void>;
 
   // --- Caller-workspace split (optional, cmux-only today) ---
 
