@@ -269,3 +269,80 @@ describe("migration", () => {
     expect(store2.getTab("test")).not.toBeNull();
   });
 });
+
+// --- cmux-managed agents (v2.14.0 Phase 1) ---
+
+describe("cmux-managed agents", () => {
+  test("createAgent defaults manager to 'screen'", () => {
+    const agent = store.createAgent({
+      id: "scr", display_name: "Scr", runtime: "claude-code", screen_name: "wire-scr",
+    });
+    expect(agent.manager).toBe("screen");
+    expect(agent.cwd).toBeNull();
+    expect(agent.cc_pid).toBeNull();
+  });
+
+  test("createAgent with manager='cmux' round-trips cwd + cc_pid", () => {
+    const agent = store.createAgent({
+      id: "fondant", display_name: "Fondant", runtime: "claude-code",
+      screen_name: "cmux:fondant", manager: "cmux",
+      cwd: "/Users/x/proj", cc_pid: 99001,
+    });
+    expect(agent.manager).toBe("cmux");
+    expect(agent.cwd).toBe("/Users/x/proj");
+    expect(agent.cc_pid).toBe(99001);
+    expect(agent.screen_pid).toBeNull();
+
+    const reread = store.getAgent("fondant")!;
+    expect(reread.manager).toBe("cmux");
+    expect(reread.cwd).toBe("/Users/x/proj");
+    expect(reread.cc_pid).toBe(99001);
+  });
+
+  test("listCmuxAgents returns only cmux-managed rows", () => {
+    store.createAgent({ id: "scr", display_name: "S", runtime: "claude-code", screen_name: "wire-s" });
+    store.createAgent({
+      id: "cm1", display_name: "C1", runtime: "claude-code",
+      screen_name: "cmux:cm1", manager: "cmux", cwd: "/x", cc_pid: 1,
+    });
+    store.createAgent({
+      id: "cm2", display_name: "C2", runtime: "claude-code",
+      screen_name: "cmux:cm2", manager: "cmux", cwd: "/y", cc_pid: 2,
+    });
+    const cmux = store.listCmuxAgents();
+    expect(cmux.map(a => a.id).sort()).toEqual(["cm1", "cm2"]);
+    expect(cmux.every(a => a.manager === "cmux")).toBe(true);
+  });
+
+  test("updateAgentCmuxPid updates cc_pid and last_seen", async () => {
+    const original = store.createAgent({
+      id: "fondant", display_name: "F", runtime: "claude-code",
+      screen_name: "cmux:fondant", manager: "cmux", cwd: "/x", cc_pid: 100,
+    });
+    await new Promise(r => setTimeout(r, 5));
+    store.updateAgentCmuxPid("fondant", 200);
+    const updated = store.getAgent("fondant")!;
+    expect(updated.cc_pid).toBe(200);
+    expect(updated.last_seen).toBeGreaterThan(original.last_seen);
+  });
+
+  test("updateAgentCwd updates cwd", () => {
+    store.createAgent({
+      id: "fondant", display_name: "F", runtime: "claude-code",
+      screen_name: "cmux:fondant", manager: "cmux", cwd: "/old", cc_pid: 1,
+    });
+    store.updateAgentCwd("fondant", "/new");
+    expect(store.getAgent("fondant")!.cwd).toBe("/new");
+  });
+
+  test("migration adds manager/cwd/cc_pid columns idempotently to a re-opened DB", () => {
+    // First store created the schema. Re-open and confirm the new columns
+    // are present and existing rows have manager='screen' (the default).
+    store.createAgent({ id: "legacy", display_name: "L", runtime: "claude-code", screen_name: "wire-legacy" });
+    const store2 = new CrewStore(dbPath);
+    const legacy = store2.getAgent("legacy")!;
+    expect(legacy.manager).toBe("screen");
+    expect(legacy.cwd).toBeNull();
+    expect(legacy.cc_pid).toBeNull();
+  });
+});

@@ -16,9 +16,45 @@ import { getClaudeCodeSessionId } from "./claude-session.js";
 
 const DEFAULT_DB = join(process.env.HOME ?? "/tmp", ".wire", "crews.db");
 const SCREEN_PREFIX = "wire-";
+const CMUX_DEFAULT_TAB = "cmux";
 
 function titleCase(s: string): string {
   return s.charAt(0).toUpperCase() + s.slice(1);
+}
+
+/**
+ * Throw a clear NotSupported error if a screen-only operation is called
+ * on a cmux-managed agent. crew owns screen sessions; for cmux-managed
+ * agents the cmux terminal owns the lifecycle and crew is registry-only.
+ *
+ * Phase 2 will route send/attach via cmux IPC. Until then, callers must
+ * use cmux's own UI for these operations.
+ */
+function refuseCmuxScreenOp(agent: Agent, opName: string): void {
+  if (agent.manager === "cmux") {
+    throw new Error(
+      `${opName}: agent '${agent.id}' is cmux-managed. ` +
+      `crew cannot drive screen ops on cmux-managed agents in Phase 1 — ` +
+      `use cmux's UI to interact with this agent. Phase 2 will add cmux-IPC routing.`,
+    );
+  }
+}
+
+/**
+ * Check if a process is alive without sending a real signal. Signal 0 is
+ * a probe — kernel does the permission/existence check and either returns
+ * or throws ESRCH (no such process) / EPERM (process exists but owned by
+ * another uid). EPERM still means alive for our purposes.
+ */
+function isProcessAlive(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (e) {
+    const err = e as NodeJS.ErrnoException;
+    if (err.code === "EPERM") return true;
+    return false;
+  }
 }
 
 /** Env keys that must never be persisted to the spawn manifest. */
@@ -566,6 +602,97 @@ export class Orchestrator {
   }
 
   /**
+   * Register a cmux-managed agent.
+   *
+   * Called by persistent-agent launcher scripts (loom, fondant, heddle,
+   * future) BEFORE `exec claude` so the agent appears in the crew registry
+   * from the moment it starts. Pure registry write — crew does not control
+   * the cmux pane lifecycle, only records it so paneNear and bridge.spawn
+   * can anchor placement on the agent.
+   *
+   * Idempotent: re-registering with the same id updates pid/cwd/pane and
+   * refreshes last_seen rather than failing. This lets a launcher script
+   * call it on every spawn without checking first.
+   *
+   * Fixes: bug-cmux-launcher-does-not-register-with-crew (2026-05-24).
+   * See also plan-brian-monorepo-bundle-kiln-review for the architecture.
+   */
+  async registerCmuxAgent(opts: {
+    id: string;
+    displayName?: string;
+    paneName: string;
+    tabName?: string;
+    cwd: string;
+    ccPid: number;
+    runtime?: string;
+    ccSessionId?: string;
+  }): Promise<Agent> {
+    if (!opts.id) throw new Error("registerCmuxAgent: id is required");
+    if (!opts.paneName) throw new Error("registerCmuxAgent: paneName is required");
+    if (!opts.cwd) throw new Error("registerCmuxAgent: cwd is required");
+    if (!Number.isInteger(opts.ccPid) || opts.ccPid <= 0) {
+      throw new Error(`registerCmuxAgent: ccPid must be a positive integer, got ${opts.ccPid}`);
+    }
+    if (!isProcessAlive(opts.ccPid)) {
+      throw new Error(
+        `registerCmuxAgent: cc_pid ${opts.ccPid} is not alive. ` +
+        `Launcher should pass $$ before exec, when the parent shell is still running.`,
+      );
+    }
+
+    const tabName = opts.tabName ?? CMUX_DEFAULT_TAB;
+    const runtime = opts.runtime ?? "claude-code";
+    const displayName = opts.displayName ?? opts.id;
+    // Synthetic screen_name: cmux agents have no real screen session, but
+    // the schema's PRIMARY KEY needs a unique non-null value. The `cmux:`
+    // prefix makes it unambiguous in logs and queries. Never passed to
+    // `screen` — see refuseCmuxScreenOp.
+    const screenName = `cmux:${opts.id}`;
+
+    // Ensure tab exists
+    if (!this.store.getTab(tabName)) {
+      this.store.createTab(tabName);
+    }
+
+    // Ensure pane exists with the requested name. Tied to the tab; no
+    // iterm_id (cmux owns the pane, we only record its name).
+    if (!this.store.getPane(opts.paneName)) {
+      this.store.createPane(opts.paneName, tabName, "");
+    }
+
+    // Idempotent re-register: if an agent row already exists for this id,
+    // update its pid/cwd/pane/last_seen and return. Otherwise insert.
+    const existing = this.store.getAgent(opts.id);
+    if (existing && existing.manager === "cmux") {
+      this.store.updateAgentCmuxPid(opts.id, opts.ccPid);
+      this.store.updateAgentCwd(opts.id, opts.cwd);
+      this.store.updateAgentPane(opts.id, opts.paneName);
+      if (opts.ccSessionId) {
+        this.store.updateAgentCcSession(existing.screen_name, opts.ccSessionId);
+      }
+      return this.store.getAgent(opts.id)!;
+    }
+    if (existing && existing.manager !== "cmux") {
+      throw new Error(
+        `registerCmuxAgent: id '${opts.id}' already exists as a ${existing.manager}-managed agent. ` +
+        `Stop the existing agent first or use a different id.`,
+      );
+    }
+
+    return this.store.createAgent({
+      id: opts.id,
+      display_name: displayName,
+      runtime,
+      screen_name: screenName,
+      cc_session_id: opts.ccSessionId,
+      pane: opts.paneName,
+      manager: "cmux",
+      cwd: opts.cwd,
+      cc_pid: opts.ccPid,
+    });
+  }
+
+  /**
    * Close an agent gracefully.
    *
    * Sends `/exit` + Enter to the agent's screen session. The runtime (Claude
@@ -590,6 +717,7 @@ export class Orchestrator {
       agent = this.store.getAgent(id);
       if (!agent) throw new Error(`agent '${id}' not found`);
     }
+    refuseCmuxScreenOp(agent, "closeAgent");
 
     if (agent.pane) {
       const pane = this.store.getPane(agent.pane);
@@ -650,6 +778,7 @@ export class Orchestrator {
       agent = this.store.getAgent(id);
       if (!agent) throw new Error(`agent '${id}' not found`);
     }
+    refuseCmuxScreenOp(agent, "stopAgent");
 
     // Clear the pane's badge before killing — otherwise the dead agent's
     // badge text lingers on the now-empty pane until something else clobbers
@@ -704,6 +833,7 @@ export class Orchestrator {
   async attachAgent(agentId: string, paneName: string): Promise<void> {
     const agent = this.store.getAgent(agentId);
     if (!agent) throw new Error(`agent '${agentId}' not found`);
+    refuseCmuxScreenOp(agent, "attachAgent");
 
     // Verify the screen session is actually alive. attachAgent used to
     // silently no-op (screen.detachSession is .nothrow(), and screen -r
@@ -919,6 +1049,7 @@ export class Orchestrator {
    */
   async sendToAgent(agentId: string, text: string, ccSessionId?: string): Promise<void> {
     const agent = this.resolveAgent(agentId, ccSessionId);
+    refuseCmuxScreenOp(agent, "sendToAgent");
     await screen.sendKeys(agent.screen_name, text);
     this.store.touchAgent(agent.id);
   }
@@ -929,6 +1060,7 @@ export class Orchestrator {
    */
   async readAgent(agentId: string, ccSessionId?: string): Promise<string> {
     const agent = this.resolveAgent(agentId, ccSessionId);
+    refuseCmuxScreenOp(agent, "readAgent");
     return screen.readOutput(agent.screen_name);
   }
 
@@ -1648,13 +1780,19 @@ export class Orchestrator {
 
   /**
    * Scan agents with `ttl_idle_minutes` set and stop any whose
-   * `last_seen` is older than the threshold. Returns the IDs reaped.
+   * `last_seen` is older than the threshold. Also soft-reap any
+   * cmux-managed agents whose `cc_pid` is no longer alive.
+   *
+   * Returns the IDs reaped.
    */
   async reap(): Promise<string[]> {
     const now = Date.now();
-    const candidates = this.store.listAgentsWithTtl();
     const reaped: string[] = [];
-    for (const agent of candidates) {
+
+    // TTL-based reaping for screen-managed agents. cmux agents are skipped
+    // here because their liveness is PID-based, not idle-time-based.
+    for (const agent of this.store.listAgentsWithTtl()) {
+      if (agent.manager === "cmux") continue;
       const ttlMs = (agent.ttl_idle_minutes ?? 0) * 60_000;
       if (ttlMs <= 0) continue;
       const idleMs = now - agent.last_seen;
@@ -1669,6 +1807,27 @@ export class Orchestrator {
         console.error(`[crew] reaper failed to stop '${agent.id}':`, e);
       }
     }
+
+    // PID-liveness soft-reap for cmux-managed agents. crew doesn't own
+    // the cmux process — it just records the registration — so "reap"
+    // means delete the registry row + tombstone, nothing more. The cmux
+    // pane stays whatever cmux makes of it (typically: scrollback retained,
+    // pane available for re-use).
+    for (const agent of this.store.listCmuxAgents()) {
+      if (!agent.cc_pid) continue;
+      if (isProcessAlive(agent.cc_pid)) continue;
+      try {
+        this.store.tombstoneAgent(agent);
+        this.store.deleteAgent(agent.id);
+        reaped.push(agent.id);
+        console.error(
+          `[crew] reaper soft-reaped cmux agent '${agent.id}' (cc_pid ${agent.cc_pid} dead)`,
+        );
+      } catch (e) {
+        console.error(`[crew] reaper failed to soft-reap cmux agent '${agent.id}':`, e);
+      }
+    }
+
     return reaped;
   }
 

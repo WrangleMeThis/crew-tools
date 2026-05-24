@@ -605,3 +605,141 @@ describe("registerAgent id-mismatch safety", () => {
     }
   });
 });
+
+describe("cmux-managed agents (v2.14.0 Phase 1)", () => {
+  const alivePid = process.pid; // the test runner's own pid — always alive
+  const deadPid = 999_999_999;  // implausibly high — should never exist
+
+  test("registerCmuxAgent creates tab, pane, and agent row", async () => {
+    const agent = await orch.registerCmuxAgent({
+      id: "fondant",
+      paneName: "fondant-cmux-pane",
+      cwd: "/Users/x/proj",
+      ccPid: alivePid,
+    });
+    expect(agent.manager).toBe("cmux");
+    expect(agent.screen_name).toBe("cmux:fondant");
+    expect(agent.pane).toBe("fondant-cmux-pane");
+    expect(agent.cwd).toBe("/Users/x/proj");
+    expect(agent.cc_pid).toBe(alivePid);
+    expect(orch.store.getTab("cmux")).not.toBeNull();
+    expect(orch.store.getPane("fondant-cmux-pane")).not.toBeNull();
+  });
+
+  test("registerCmuxAgent honors custom tab name", async () => {
+    await orch.registerCmuxAgent({
+      id: "loom", paneName: "loom-cmux-pane",
+      tabName: "tankloop", cwd: "/x", ccPid: alivePid,
+    });
+    expect(orch.store.getTab("tankloop")).not.toBeNull();
+  });
+
+  test("registerCmuxAgent is idempotent — second call updates pid + last_seen", async () => {
+    const a1 = await orch.registerCmuxAgent({
+      id: "fondant", paneName: "fondant-cmux-pane",
+      cwd: "/x", ccPid: alivePid,
+    });
+    await new Promise(r => setTimeout(r, 5));
+    const a2 = await orch.registerCmuxAgent({
+      id: "fondant", paneName: "fondant-cmux-pane",
+      cwd: "/x-new", ccPid: alivePid,
+    });
+    expect(a2.id).toBe(a1.id);
+    expect(a2.cwd).toBe("/x-new");
+    expect(a2.last_seen).toBeGreaterThan(a1.last_seen);
+    // Only one agent row exists
+    expect(orch.store.listAgents().filter(a => a.id === "fondant")).toHaveLength(1);
+  });
+
+  test("registerCmuxAgent refuses dead cc_pid", async () => {
+    await expect(orch.registerCmuxAgent({
+      id: "ghost", paneName: "ghost-pane", cwd: "/x", ccPid: deadPid,
+    })).rejects.toThrow(/cc_pid .* is not alive/);
+  });
+
+  test("registerCmuxAgent refuses non-positive cc_pid", async () => {
+    await expect(orch.registerCmuxAgent({
+      id: "x", paneName: "x-pane", cwd: "/x", ccPid: 0,
+    })).rejects.toThrow(/positive integer/);
+  });
+
+  test("registerCmuxAgent refuses to clobber a screen-managed agent with the same id", async () => {
+    orch.store.createAgent({
+      id: "fondant", display_name: "F", runtime: "claude-code",
+      screen_name: "wire-fondant",
+    });
+    await expect(orch.registerCmuxAgent({
+      id: "fondant", paneName: "p", cwd: "/x", ccPid: alivePid,
+    })).rejects.toThrow(/already exists as a screen-managed agent/);
+  });
+
+  test("sendToAgent throws NotSupported on cmux agent", async () => {
+    await orch.registerCmuxAgent({
+      id: "fondant", paneName: "p", cwd: "/x", ccPid: alivePid,
+    });
+    await expect(orch.sendToAgent("fondant", "hi")).rejects.toThrow(/sendToAgent: agent 'fondant' is cmux-managed/);
+  });
+
+  test("attachAgent throws NotSupported on cmux agent", async () => {
+    await orch.registerCmuxAgent({
+      id: "fondant", paneName: "p", cwd: "/x", ccPid: alivePid,
+    });
+    await expect(orch.attachAgent("fondant", "p")).rejects.toThrow(/attachAgent: agent 'fondant' is cmux-managed/);
+  });
+
+  test("closeAgent throws NotSupported on cmux agent", async () => {
+    await orch.registerCmuxAgent({
+      id: "fondant", paneName: "p", cwd: "/x", ccPid: alivePid,
+    });
+    await expect(orch.closeAgent("fondant")).rejects.toThrow(/closeAgent: agent 'fondant' is cmux-managed/);
+  });
+
+  test("stopAgent throws NotSupported on cmux agent", async () => {
+    await orch.registerCmuxAgent({
+      id: "fondant", paneName: "p", cwd: "/x", ccPid: alivePid,
+    });
+    await expect(orch.stopAgent("fondant")).rejects.toThrow(/stopAgent: agent 'fondant' is cmux-managed/);
+  });
+
+  test("reap() soft-reaps cmux agent whose cc_pid is dead", async () => {
+    // Register live; then mutate cc_pid in-DB to a known-dead value to
+    // simulate a process that died after registration. (We can't register
+    // with a dead pid because the API rejects that.)
+    await orch.registerCmuxAgent({
+      id: "fondant", paneName: "p", cwd: "/x", ccPid: alivePid,
+    });
+    orch.store.updateAgentCmuxPid("fondant", deadPid);
+
+    const reaped = await orch.reap();
+    expect(reaped).toContain("fondant");
+    expect(orch.store.getAgent("fondant")).toBeNull();
+    expect(orch.store.getLatestTombstone("fondant")).not.toBeNull();
+  });
+
+  test("reap() leaves cmux agents alone while cc_pid is alive", async () => {
+    await orch.registerCmuxAgent({
+      id: "fondant", paneName: "p", cwd: "/x", ccPid: alivePid,
+    });
+    const reaped = await orch.reap();
+    expect(reaped).not.toContain("fondant");
+    expect(orch.store.getAgent("fondant")).not.toBeNull();
+  });
+
+  test("reap() does not apply TTL logic to cmux agents (PID liveness wins)", async () => {
+    // A cmux agent with TTL set + idle longer than TTL must still survive
+    // as long as its cc_pid is alive. PID liveness overrides idle TTL for
+    // cmux-managed rows.
+    await orch.registerCmuxAgent({
+      id: "fondant", paneName: "p", cwd: "/x", ccPid: alivePid,
+    });
+    orch.store.setAgentTtl("fondant", 1); // 1-minute TTL
+    // Backdate last_seen to 10 minutes ago
+    const db = (orch.store as any).db;
+    db.prepare("UPDATE agents SET last_seen = ? WHERE id = ?")
+      .run(Date.now() - 10 * 60_000, "fondant");
+
+    const reaped = await orch.reap();
+    expect(reaped).not.toContain("fondant");
+    expect(orch.store.getAgent("fondant")).not.toBeNull();
+  });
+});

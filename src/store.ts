@@ -24,6 +24,26 @@ export type Pane = {
   created_at: number;
 };
 
+/**
+ * Which terminal layer manages this agent.
+ *
+ * - `screen`: agent runs inside a GNU screen session that crew
+ *   created and owns. screen_name is the screen handle; screen_pid is
+ *   the screen process. agent_send/agent_attach drive it.
+ * - `cmux`: agent runs inside a cmux-managed pane created OUTSIDE crew
+ *   (typically by a persistent-agent launcher like fondant-cmux-launcher.sh).
+ *   crew has a registry-only relationship — knows the agent exists, where
+ *   its pane is, what process owns it, but does not control it. cc_pid
+ *   is the liveness anchor; screen_name is a synthetic placeholder that
+ *   exists only to satisfy the schema's NOT NULL constraint. agent_send /
+ *   agent_attach throw NotSupported in Phase 1.
+ *
+ * See plan-brian-monorepo-bundle-kiln-review §"Q6" (column-on-shared-table
+ * decision) and bug-cmux-launcher-does-not-register-with-crew (the bug
+ * this column fixes).
+ */
+export type AgentManager = "screen" | "cmux";
+
 export type Agent = {
   id: string;
   display_name: string;
@@ -46,6 +66,20 @@ export type Agent = {
    * machine's local crew DB, annotated by this column.
    */
   machine_name: string;
+  manager: AgentManager;
+  /**
+   * Working directory of the agent process. Populated for cmux-managed
+   * agents (the launcher passes $PWD). For screen-managed agents this is
+   * typically null — screen sessions carry their own cwd via the screenrc.
+   */
+  cwd: string | null;
+  /**
+   * PID of the agent's Claude Code process. Populated for cmux-managed
+   * agents (the launcher passes $$). The reaper checks this PID with
+   * `process.kill(pid, 0)` to decide whether a cmux agent is still alive.
+   * For screen agents this is null — screen_pid is the liveness anchor.
+   */
+  cc_pid: number | null;
 };
 
 /**
@@ -262,6 +296,27 @@ export class CrewStore {
       this.db.exec(`ALTER TABLE agents ADD COLUMN machine_name TEXT NOT NULL DEFAULT '${localName.replace(/'/g, "''")}'`);
     }
 
+    // v2.14.0 Phase 1: cmux-managed agents. Three additive columns.
+    // Idempotent so re-running against an existing DB is safe.
+    const hasManager = this.db.prepare(
+      "SELECT * FROM pragma_table_info('agents') WHERE name='manager'"
+    ).get();
+    if (!hasManager) {
+      this.db.exec("ALTER TABLE agents ADD COLUMN manager TEXT NOT NULL DEFAULT 'screen'");
+    }
+    const hasCwd = this.db.prepare(
+      "SELECT * FROM pragma_table_info('agents') WHERE name='cwd'"
+    ).get();
+    if (!hasCwd) {
+      this.db.exec("ALTER TABLE agents ADD COLUMN cwd TEXT");
+    }
+    const hasCcPid = this.db.prepare(
+      "SELECT * FROM pragma_table_info('agents') WHERE name='cc_pid'"
+    ).get();
+    if (!hasCcPid) {
+      this.db.exec("ALTER TABLE agents ADD COLUMN cc_pid INTEGER");
+    }
+
     // Machines table (v2.4.0) — cross-machine orchestration registry.
     this.db.exec(`
       CREATE TABLE IF NOT EXISTS machines (
@@ -381,12 +436,16 @@ export class CrewStore {
     badge?: string;
     ttl_idle_minutes?: number;
     spawn_manifest?: string;
+    manager?: AgentManager;
+    cwd?: string;
+    cc_pid?: number;
   }): Agent {
     const now = Date.now();
     const machineName = hostname().toLowerCase();
+    const manager: AgentManager = agent.manager ?? "screen";
     this.db.prepare(
-      `INSERT INTO agents (id, display_name, runtime, screen_name, screen_pid, cc_session_id, pane, badge, launched_at, last_seen, ttl_idle_minutes, spawn_manifest, machine_name)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+      `INSERT INTO agents (id, display_name, runtime, screen_name, screen_pid, cc_session_id, pane, badge, launched_at, last_seen, ttl_idle_minutes, spawn_manifest, machine_name, manager, cwd, cc_pid)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
     ).run(
       agent.id, agent.display_name, agent.runtime, agent.screen_name,
       agent.screen_pid ?? null, agent.cc_session_id ?? null,
@@ -394,6 +453,9 @@ export class CrewStore {
       agent.ttl_idle_minutes ?? null,
       agent.spawn_manifest ?? null,
       machineName,
+      manager,
+      agent.cwd ?? null,
+      agent.cc_pid ?? null,
     );
     return {
       id: agent.id,
@@ -411,7 +473,17 @@ export class CrewStore {
       ttl_idle_minutes: agent.ttl_idle_minutes ?? null,
       spawn_manifest: agent.spawn_manifest ?? null,
       machine_name: machineName,
+      manager,
+      cwd: agent.cwd ?? null,
+      cc_pid: agent.cc_pid ?? null,
     };
+  }
+
+  /** List agents managed by cmux. Used by the reaper for PID-liveness checks. */
+  listCmuxAgents(): Agent[] {
+    return this.db.prepare(
+      "SELECT * FROM agents WHERE manager = 'cmux'"
+    ).all() as Agent[];
   }
 
   /** Copy an agent row into the tombstones table. Call before deleteAgent. */
@@ -489,6 +561,16 @@ export class CrewStore {
 
   updateAgentPid(id: string, pid: number): void {
     this.db.prepare("UPDATE agents SET screen_pid = ?, last_seen = ? WHERE id = ?").run(pid, Date.now(), id);
+  }
+
+  /** Update the cc_pid of a cmux-managed agent and refresh last_seen. */
+  updateAgentCmuxPid(id: string, ccPid: number): void {
+    this.db.prepare("UPDATE agents SET cc_pid = ?, last_seen = ? WHERE id = ?").run(ccPid, Date.now(), id);
+  }
+
+  /** Update the recorded cwd of an agent. */
+  updateAgentCwd(id: string, cwd: string): void {
+    this.db.prepare("UPDATE agents SET cwd = ?, last_seen = ? WHERE id = ?").run(cwd, Date.now(), id);
   }
 
   updateAgentPane(id: string, pane: string | null): void {

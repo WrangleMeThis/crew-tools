@@ -32,6 +32,10 @@ Commands:
   close   <id> [--cc-session-id ID]        Gracefully close an agent (sends /exit + Enter, falls back to kill after 10s). Preferred over stop. Matches crew's agent_close MCP tool.
   stop    <id> [--cc-session-id ID]        Hard-stop an agent (kills the screen session). Use only when the runtime is unresponsive. Matches crew's agent_stop MCP tool.
   agent-send <id> <text>                   Send keystrokes to an agent's screen.
+  register-cmux --id <id> --pane <name>    Register a cmux-managed agent (called from persistent-agent launchers before exec).
+    --cwd <path> --cc-pid <pid>            Required: id, pane, cwd, cc-pid. Optional: --tab (default 'cmux'), --display-name, --runtime, --cc-session-id.
+    [--tab <name>] [--display-name <name>] Idempotent — safe to call on every launcher invocation.
+    [--runtime <r>] [--cc-session-id <id>]
   machine-register --json <path|->         Register a peer machine in this DB. JSON: {name, ssh_host, ssh_port?, notes?, skip_probe?}.
                                            Used by reciprocal pairing — laptop SSHes mini and runs this to add itself.
   hostname                                 Print the local hostname (for reciprocal-pairing fallback).
@@ -154,6 +158,35 @@ export async function runCli(argv: string[]): Promise<CliResult> {
         return { exit: 0, stdout: `${JSON.stringify({ sent: true, id })}\n` };
       } catch (e) {
         return { exit: 2, stderr: `agent-send failed: ${(e as Error).message}\n` };
+      }
+    }
+
+    case "register-cmux": {
+      const flags = parseFlags(rest);
+      if (!flags.id) return { exit: 1, stderr: "register-cmux requires --id\n" };
+      if (!flags.pane) return { exit: 1, stderr: "register-cmux requires --pane\n" };
+      if (!flags.cwd) return { exit: 1, stderr: "register-cmux requires --cwd\n" };
+      const ccPidStr = flags["cc-pid"];
+      if (!ccPidStr) return { exit: 1, stderr: "register-cmux requires --cc-pid\n" };
+      const ccPid = parseInt(ccPidStr, 10);
+      if (!Number.isInteger(ccPid) || ccPid <= 0) {
+        return { exit: 1, stderr: `register-cmux: --cc-pid must be a positive integer, got '${ccPidStr}'\n` };
+      }
+      try {
+        const orch = new Orchestrator(await createBackend());
+        const agent = await orch.registerCmuxAgent({
+          id: flags.id,
+          paneName: flags.pane,
+          tabName: flags.tab || undefined,
+          displayName: flags["display-name"] || undefined,
+          cwd: flags.cwd,
+          ccPid,
+          runtime: flags.runtime || undefined,
+          ccSessionId: flags["cc-session-id"] || undefined,
+        });
+        return { exit: 0, stdout: `${JSON.stringify(agent)}\n` };
+      } catch (e) {
+        return { exit: 2, stderr: `register-cmux failed: ${(e as Error).message}\n` };
       }
     }
 
