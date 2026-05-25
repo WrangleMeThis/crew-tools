@@ -26,13 +26,17 @@ const DEFAULTS: Record<string, RuntimeConfig> = {
     description: "Claude Code with Wire channel (SSE push). MCP plugins (wire-ipc, personai, crew) load from installed_plugins.json per project scope.",
   },
   "codex": {
-    // --dangerously-bypass-approvals-and-sandbox is codex's equivalent of
-    // claude's --permission-mode bypassPermissions: it skips per-command
-    // approval prompts so the agent can do real work headlessly. Without it,
-    // every shell call / file write blocks on a TUI prompt and the agent
-    // appears to hang. Loom hit this 2026-05-25 spawning kiln-wo-0525; same
-    // root cause as Banksy's "Conversation interrupted" hangs the same day.
-    command: "codex --dangerously-bypass-approvals-and-sandbox",
+    // --yolo is codex's hidden alias for --dangerously-bypass-approvals-
+    // and-sandbox: skips per-command approval prompts so headless agents
+    // can do real work. Without it, every shell call / file write blocks
+    // on a TUI prompt and the agent appears to hang. Loom hit this
+    // 2026-05-25 spawning kiln-wo-0525; same root cause as Banksy's
+    // "Conversation interrupted" hangs the same day.
+    //
+    // `--yolo` is undocumented in `codex --help` but verified live against
+    // codex-cli 0.130.0 (shows approval=never, sandbox=danger-full-access).
+    // Per Brian's preference 2026-05-25.
+    command: "codex --yolo",
     description: "OpenAI Codex CLI (approvals + sandbox bypassed for headless agent work)",
   },
 };
