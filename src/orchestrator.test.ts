@@ -634,6 +634,37 @@ describe("cmux-managed agents (v2.14.0 Phase 1)", () => {
     expect(orch.store.getTab("tankloop")).not.toBeNull();
   });
 
+  test("registerCmuxAgent self-stamps panes.iterm_id when surfaceUuid is given", async () => {
+    const uuid = "390546DE-F0E0-469C-B1C4-0FDB152D6A62";
+    await orch.registerCmuxAgent({
+      id: "fondant", paneName: "fondant-cmux-pane",
+      cwd: "/x", ccPid: alivePid, surfaceUuid: uuid,
+    });
+    expect(orch.store.getPane("fondant-cmux-pane")!.iterm_id).toBe(uuid);
+  });
+
+  test("registerCmuxAgent leaves panes.iterm_id null when surfaceUuid omitted", async () => {
+    await orch.registerCmuxAgent({
+      id: "fondant", paneName: "fondant-cmux-pane",
+      cwd: "/x", ccPid: alivePid,
+    });
+    expect(orch.store.getPane("fondant-cmux-pane")!.iterm_id).toBeNull();
+  });
+
+  test("registerCmuxAgent surfaceUuid overwrites a stale stamp on re-register", async () => {
+    const oldUuid = "AAAAAAAA-0000-0000-0000-000000000000";
+    const newUuid = "BBBBBBBB-1111-1111-1111-111111111111";
+    await orch.registerCmuxAgent({
+      id: "fondant", paneName: "fondant-cmux-pane",
+      cwd: "/x", ccPid: alivePid, surfaceUuid: oldUuid,
+    });
+    await orch.registerCmuxAgent({
+      id: "fondant", paneName: "fondant-cmux-pane",
+      cwd: "/x", ccPid: alivePid, surfaceUuid: newUuid,
+    });
+    expect(orch.store.getPane("fondant-cmux-pane")!.iterm_id).toBe(newUuid);
+  });
+
   test("registerCmuxAgent is idempotent — second call updates pid + last_seen", async () => {
     const a1 = await orch.registerCmuxAgent({
       id: "fondant", paneName: "fondant-cmux-pane",

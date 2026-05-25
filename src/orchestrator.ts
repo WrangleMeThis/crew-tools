@@ -626,6 +626,14 @@ export class Orchestrator {
     ccPid: number;
     runtime?: string;
     ccSessionId?: string;
+    /**
+     * Optional cmux surface UUID for the pane the agent runs in. Captured
+     * from `$CMUX_PANEL_ID` by the launcher script. When provided, gets
+     * stamped into `panes.iterm_id` so bridge.spawn / pane_create can do
+     * real cmux splits anchored on this pane (without it, splits fall
+     * back to the three-tier "fresh tab" path). See [[reference-self-stamp]].
+     */
+    surfaceUuid?: string;
   }): Promise<Agent> {
     if (!opts.id) throw new Error("registerCmuxAgent: id is required");
     if (!opts.paneName) throw new Error("registerCmuxAgent: paneName is required");
@@ -655,9 +663,18 @@ export class Orchestrator {
     }
 
     // Ensure pane exists with the requested name. Tied to the tab; no
-    // iterm_id (cmux owns the pane, we only record its name).
+    // iterm_id by default (cmux owns the pane, we only record its name).
     if (!this.store.getPane(opts.paneName)) {
       this.store.createPane(opts.paneName, tabName, "");
+    }
+
+    // Self-stamp the pane's surface UUID if provided. Without this, bridge's
+    // cmux backend can't execute real splits anchored on this pane — paneNear
+    // resolves but the split RPC has no concrete surface to split from.
+    // Idempotent (always overwrites with the current launcher's CMUX_PANEL_ID,
+    // which is the live truth).
+    if (opts.surfaceUuid) {
+      this.store.setPaneItermId(opts.paneName, opts.surfaceUuid);
     }
 
     // Idempotent re-register: if an agent row already exists for this id,

@@ -33,9 +33,10 @@ Commands:
   stop    <id> [--cc-session-id ID]        Hard-stop an agent (kills the screen session). Use only when the runtime is unresponsive. Matches crew's agent_stop MCP tool.
   agent-send <id> <text>                   Send keystrokes to an agent's screen.
   register-cmux --id <id> --pane <name>    Register a cmux-managed agent (called from persistent-agent launchers before exec).
-    --cwd <path> --cc-pid <pid>            Required: id, pane, cwd, cc-pid. Optional: --tab (default 'cmux'), --display-name, --runtime, --cc-session-id.
-    [--tab <name>] [--display-name <name>] Idempotent — safe to call on every launcher invocation.
-    [--runtime <r>] [--cc-session-id <id>]
+    --cwd <path> --cc-pid <pid>            Required: id, pane, cwd, cc-pid. Optional: --tab (default 'cmux'),
+    [--tab <name>] [--display-name <name>]   --display-name, --runtime, --cc-session-id, --surface-uuid.
+    [--runtime <r>] [--cc-session-id <id>]  --surface-uuid stamps panes.iterm_id (pass $CMUX_PANEL_ID from cmux env)
+    [--surface-uuid <uuid>]                 so bridge.spawn can do real splits anchored on this pane.
   machine-register --json <path|->         Register a peer machine in this DB. JSON: {name, ssh_host, ssh_port?, notes?, skip_probe?}.
                                            Used by reciprocal pairing — laptop SSHes mini and runs this to add itself.
   hostname                                 Print the local hostname (for reciprocal-pairing fallback).
@@ -183,6 +184,7 @@ export async function runCli(argv: string[]): Promise<CliResult> {
           ccPid,
           runtime: flags.runtime || undefined,
           ccSessionId: flags["cc-session-id"] || undefined,
+          surfaceUuid: flags["surface-uuid"] || undefined,
         });
         return { exit: 0, stdout: `${JSON.stringify(agent)}\n` };
       } catch (e) {
