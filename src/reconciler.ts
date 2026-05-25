@@ -60,6 +60,17 @@ export async function reconcile(
     // delete every remote agent — classic latent fatal bug.
     if (agent.machine_name !== localMachine) continue;
 
+    // cmux-managed agents have synthetic screen_names ("cmux:<id>") that
+    // are never present in `listSessions()`. Their liveness is owned by
+    // the PID-based reaper pass (see Orchestrator.reap). Without this
+    // skip, the screen-liveness check below deletes every cmux agent on
+    // every reconcile run — the latent v2.14.0 bug that wiped fondant +
+    // loom overnight 2026-05-25 when a fresh crew MCP triggered reconcile.
+    if (agent.manager === "cmux") {
+      alive.push(agent.id);
+      continue;
+    }
+
     knownScreenNames.add(agent.screen_name);
     const session = sessionByName.get(agent.screen_name);
     // Two-step liveness check. `screen -ls` lists zombie sessions briefly

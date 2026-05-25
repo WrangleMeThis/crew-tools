@@ -107,6 +107,26 @@ describe("reconcile cross-machine safety", () => {
     expect(result.dead).not.toContain("remote-alive");
     expect(store.getAgent("remote-alive")).not.toBeNull();
   });
+
+  test("skips cmux-managed agents (screen liveness doesn't apply)", async () => {
+    // cmux agents have synthetic screen_names that listSessions() never sees.
+    // Without the manager='cmux' skip, every reconcile run would delete every
+    // cmux agent — the latent v2.14.0 bug that wiped fondant + loom overnight
+    // 2026-05-25.
+    store.createAgent({
+      id: "fondant", display_name: "Fondant", runtime: "claude-code",
+      screen_name: "cmux:fondant", manager: "cmux",
+      cwd: "/Users/x/proj", cc_pid: process.pid,
+    });
+    const result = await reconcile(store);
+
+    // The cmux agent must NOT be in dead.
+    expect(result.dead).not.toContain("fondant");
+    // It IS in alive — reconcile says "yes, we know about this, leave it be."
+    expect(result.alive).toContain("fondant");
+    // Row still exists.
+    expect(store.getAgent("fondant")).not.toBeNull();
+  });
 });
 
 describe("reconcile theme healing", () => {
